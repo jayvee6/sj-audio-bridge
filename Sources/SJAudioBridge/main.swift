@@ -10,6 +10,7 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private var statusMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -24,11 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "SJAudioBridge \(appVersion)", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Status: idle (capture lands in B3)",
+        statusMenuItem = NSMenuItem(
+            title: "Status: checking capture access…",
             action: nil,
             keyEquivalent: ""
         )
+        menu.addItem(statusMenuItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(
             title: "Quit SJAudioBridge",
@@ -38,6 +40,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
+
+        // B2: probe Screen Recording access + enumerate shareable content.
+        // The grant prompt appears here on first launch (signed build).
+        ScreenCaptureAccess.request()
+        Task { await self.refreshCaptureStatus() }
+    }
+
+    private func refreshCaptureStatus() async {
+        let line: String
+        do {
+            let s = try await ShareableContent.summarize()
+            line = "Capture OK — \(s.displayCount) display(s), "
+                + "\(s.applicationCount) app(s)"
+            FileHandle.standardError.write(Data(
+                ("[B2] \(line); first: \(s.firstDisplayDescription ?? "none")\n").utf8
+            ))
+        } catch {
+            line = "No capture access — grant Screen Recording"
+            FileHandle.standardError.write(Data(
+                ("[B2] \(error)\n").utf8
+            ))
+        }
+        statusMenuItem.title = "Status: \(line)"
     }
 
     @objc private func quit() {
