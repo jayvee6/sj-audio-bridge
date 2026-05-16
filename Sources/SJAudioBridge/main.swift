@@ -11,6 +11,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
+    private var capture: AudioCapture?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -56,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data(
                 ("[B2] \(line); first: \(s.firstDisplayDescription ?? "none")\n").utf8
             ))
+            statusMenuItem.title = "Status: \(line)"
+            await startCapture()
+            return
         } catch {
             line = "No capture access — grant Screen Recording"
             FileHandle.standardError.write(Data(
@@ -63,6 +67,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ))
         }
         statusMenuItem.title = "Status: \(line)"
+    }
+
+    /// B3: start SCStream audio capture; surface live RMS in the menubar +
+    /// stderr so we can confirm real system audio is flowing.
+    private func startCapture() async {
+        let cap = AudioCapture { [weak self] rms in
+            // SCStreamOutput queue → hop to main for UI.
+            let rmsD = Double(rms)
+            let db = rmsD > 0 ? 20 * log10(rmsD) : -120
+            FileHandle.standardError.write(Data(
+                (String(format: "[B3] RMS=%.5f (%.1f dBFS)\n", rmsD, db)).utf8
+            ))
+            Task { @MainActor in
+                self?.statusMenuItem.title = String(
+                    format: "Status: capturing — %.1f dBFS", db
+                )
+            }
+        }
+        do {
+            try await cap.start()
+            capture = cap
+            FileHandle.standardError.write(Data("[B3] SCStream capture started\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data("[B3] capture start failed: \(error)\n".utf8))
+            statusMenuItem.title = "Status: capture start failed"
+        }
     }
 
     @objc private func quit() {
