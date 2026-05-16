@@ -1,4 +1,4 @@
-// B3: SCStream system-audio capture + live RMS.
+// B3+B4: SCStream system-audio capture → fixed-size Float32 mono PCM blocks.
 //
 // ScreenCaptureKit audio capture still requires an SCContentFilter with a
 // display (the "display-filter trick") even though we only consume audio —
@@ -8,15 +8,17 @@
 // `excludesCurrentProcessAudio = true` is a non-negotiable: the bridge must
 // never capture its own output (feedback / privacy).
 //
-// B3 only computes RMS to prove real signal flows. B4 turns the same
-// CMSampleBuffer path into Float32 mono PCM blocks for the WebSocket.
+// B4 deliverable: downmix to mono and chunk into fixed `blockSize` Float32
+// blocks — this is the exact payload the B6 WebSocket frames will ship. RMS
+// is computed from the same mono blocks so the menubar stays a live
+// correctness handle.
 
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
-/// Owns the SCStream. Runs off the main actor; emits RMS levels via a
-/// Sendable callback (caller hops to MainActor for UI).
+/// Owns the SCStream. Runs off the main actor; emits mono PCM blocks + RMS
+/// via Sendable callbacks (caller hops to MainActor for UI).
 final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked Sendable {
     enum CaptureError: Error, CustomStringConvertible {
         case noDisplay
@@ -29,16 +31,34 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked
         }
     }
 
+    /// Output sample rate (we pin SCStreamConfiguration to this).
+    static let sampleRate = 48_000
+
     private let queue = DispatchQueue(label: "dev.studiojoe.sjaudiobridge.audio")
     private var stream: SCStream?
+    private let blockSize: Int
+    private let onBlock: @Sendable ([Float]) -> Void
     private let onLevel: @Sendable (Float) -> Void
 
-    // RMS log throttle: accumulate ~0.5 s of audio before emitting one level.
+    // Mono accumulator → emitted in exact blockSize chunks.
+    private var monoAccum: [Float] = []
+
+    // RMS throttle over emitted mono samples (~0.5 s @ 48 kHz).
     private var accSquares: Double = 0
     private var accCount: Int = 0
-    private let accThreshold = 24_000  // ~0.5 s @ 48 kHz
+    private let accThreshold = 24_000
 
-    init(onLevel: @escaping @Sendable (Float) -> Void) {
+    /// - Parameters:
+    ///   - blockSize: mono samples per emitted block (default 1024 ≈ 21 ms).
+    ///   - onBlock: receives an owned copy of exactly `blockSize` mono Float32.
+    ///   - onLevel: RMS of recent mono audio, for the menubar readout.
+    init(
+        blockSize: Int = 1024,
+        onBlock: @escaping @Sendable ([Float]) -> Void,
+        onLevel: @escaping @Sendable (Float) -> Void
+    ) {
+        self.blockSize = blockSize
+        self.onBlock = onBlock
         self.onLevel = onLevel
         super.init()
     }
@@ -53,7 +73,7 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.sampleRate = 48_000
+        config.sampleRate = Self.sampleRate
         config.channelCount = 2
         config.excludesCurrentProcessAudio = true
         // Minimize the mandatory video path — we never read screen frames.
@@ -81,6 +101,7 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked
         guard let s = stream else { return }
         try? await s.stopCapture()
         stream = nil
+        monoAccum.removeAll(keepingCapacity: false)
     }
 
     // MARK: SCStreamOutput
@@ -92,30 +113,56 @@ final class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput, @unchecked
     ) {
         guard type == .audio, sampleBuffer.isValid else { return }
 
-        // SCK delivers 32-bit float PCM. Sum squares across every channel
-        // buffer — exact channel layout is irrelevant for an RMS check.
-        var sumSq: Double = 0
-        var n = 0
         do {
             try sampleBuffer.withAudioBufferList { abl, _ in
-                for buffer in abl {
-                    guard let data = buffer.mData else { continue }
-                    let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-                    let samples = data.assumingMemoryBound(to: Float.self)
-                    for i in 0..<count {
-                        let v = Double(samples[i])
-                        sumSq += v * v
+                let buffers = Array(abl)
+                guard let first = buffers.first, let firstData = first.mData else { return }
+
+                if buffers.count >= 2 {
+                    // Non-interleaved (planar): one Float32 buffer per channel.
+                    let frames = Int(first.mDataByteSize) / MemoryLayout<Float>.size
+                    let planes = buffers.compactMap { $0.mData?.assumingMemoryBound(to: Float.self) }
+                    let ch = Float(planes.count)
+                    for f in 0..<frames {
+                        var s: Float = 0
+                        for p in planes { s += p[f] }
+                        appendMono(s / ch)
                     }
-                    n += count
+                } else if first.mNumberChannels > 1 {
+                    // Interleaved: single buffer, mNumberChannels samples/frame.
+                    let ch = Int(first.mNumberChannels)
+                    let total = Int(first.mDataByteSize) / MemoryLayout<Float>.size
+                    let p = firstData.assumingMemoryBound(to: Float.self)
+                    var i = 0
+                    while i + ch <= total {
+                        var s: Float = 0
+                        for c in 0..<ch { s += p[i + c] }
+                        appendMono(s / Float(ch))
+                        i += ch
+                    }
+                } else {
+                    // Already mono.
+                    let frames = Int(first.mDataByteSize) / MemoryLayout<Float>.size
+                    let p = firstData.assumingMemoryBound(to: Float.self)
+                    for f in 0..<frames { appendMono(p[f]) }
                 }
             }
         } catch {
             return
         }
-        guard n > 0 else { return }
+    }
 
-        accSquares += sumSq
-        accCount += n
+    /// Append one mono sample; flush a block + update RMS every `blockSize`.
+    private func appendMono(_ v: Float) {
+        monoAccum.append(v)
+        accSquares += Double(v) * Double(v)
+        accCount += 1
+
+        if monoAccum.count >= blockSize {
+            let block = Array(monoAccum.prefix(blockSize))
+            monoAccum.removeFirst(blockSize)
+            onBlock(block)
+        }
         if accCount >= accThreshold {
             let rms = Float((accSquares / Double(accCount)).squareRoot())
             accSquares = 0
