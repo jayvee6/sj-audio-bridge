@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
     private var capture: AudioCapture?
+    private let wsServer = WSServer()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -108,6 +109,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             FileHandle.standardError.write(Data("[B4] capture start failed: \(error)\n".utf8))
             statusMenuItem.title = "Status: capture start failed"
+            return
+        }
+
+        // B5: stand up the loopback WebSocket server (token-gated PCM in B6).
+        do {
+            try wsServer.start()
+            FileHandle.standardError.write(Data(
+                "[B5] WS server up at \(wsServer.endpointURL)\n".utf8
+            ))
+        } catch {
+            FileHandle.standardError.write(Data("[B5] WS server failed: \(error)\n".utf8))
         }
     }
 
