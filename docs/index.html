@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SJAudioBridge — system audio in any browser</title>
+<meta name="description" content="A notarized macOS menubar app that streams system audio to any browser over a token-gated localhost WebSocket. Bit-perfect, works in Safari and Firefox, DRM-capable." />
+<meta property="og:title" content="SJAudioBridge — system audio in any browser" />
+<meta property="og:description" content="The way Zoom does it, not a hack. Notarized macOS helper → token-gated localhost WebSocket → any browser." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0b10'/%3E%3Cg fill='%23a855f7'%3E%3Crect x='5' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='11' y='8' width='3' height='16' rx='1.5'/%3E%3Crect x='17' y='4' width='3' height='24' rx='1.5'/%3E%3Crect x='23' y='10' width='3' height='12' rx='1.5'/%3E%3C/g%3E%3C/svg%3E" />
+<style>
+  :root{
+    --bg:#0b0b10; --panel:#13131c; --line:#26263a;
+    --ink:#eef0f7; --muted:#9aa0b4; --pur:#a855f7; --grn:#10b981;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow-x:hidden;
+  }
+  a{color:var(--pur); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:980px; margin:0 auto; padding:0 24px}
+  h1{font-size:clamp(2.4rem,6vw,4rem); line-height:1.05; letter-spacing:-.02em; font-weight:800}
+  h2{font-size:1.7rem; letter-spacing:-.01em; margin-bottom:.6em; font-weight:700}
+  h3{font-size:1.05rem; font-weight:700; margin-bottom:.3em}
+  p{color:var(--muted)}
+  .grad{background:linear-gradient(110deg,var(--grn),var(--pur));-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  /* hero */
+  header{position:relative; padding:96px 0 64px; text-align:center; overflow:hidden}
+  #viz{position:absolute; inset:auto 0 0 0; height:240px; width:100%; opacity:.45; mask-image:linear-gradient(to top,#000,transparent)}
+  header .wrap{position:relative; z-index:1}
+  .badge{display:inline-block; font-size:.78rem; color:var(--grn);
+    border:1px solid var(--line); border-radius:999px; padding:5px 14px; margin-bottom:24px;
+    background:rgba(16,185,129,.06)}
+  header p.lead{font-size:1.2rem; max-width:620px; margin:18px auto 0; color:#c4c8d8}
+  .cta{display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:36px}
+  .btn{display:inline-block; padding:13px 26px; border-radius:10px; font-weight:600; font-size:.98rem}
+  .btn.primary{background:var(--pur); color:#fff}
+  .btn.primary:hover{background:#9333ea; text-decoration:none}
+  .btn.ghost{border:1px solid var(--line); color:var(--ink)}
+  .btn.ghost:hover{border-color:var(--pur); text-decoration:none}
+  .meta{margin-top:22px; font-size:.85rem; color:var(--muted)}
+
+  section{padding:60px 0; border-top:1px solid var(--line)}
+  .lead-row{display:grid; grid-template-columns:1fr 1fr; gap:40px; align-items:start}
+  @media(max-width:760px){.lead-row{grid-template-columns:1fr}}
+  pre{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px 20px; overflow-x:auto; font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:#d6d9e6}
+  code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace; color:#e7c6ff}
+  pre code{color:inherit}
+  .diagram{font:12.5px/1.7 ui-monospace,Menlo,monospace; white-space:pre; color:var(--muted);
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:22px; overflow-x:auto}
+  .cards{display:grid; grid-template-columns:repeat(3,1fr); gap:18px}
+  @media(max-width:760px){.cards{grid-template-columns:1fr}}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:22px}
+  .card h3{color:var(--ink)}
+  .card p{font-size:.92rem}
+  ol.steps{counter-reset:s; list-style:none; max-width:680px}
+  ol.steps li{counter-increment:s; position:relative; padding:12px 0 12px 46px; color:#c4c8d8}
+  ol.steps li::before{content:counter(s); position:absolute; left:0; top:10px;
+    width:30px; height:30px; border-radius:50%; background:var(--panel);
+    border:1px solid var(--line); color:var(--pur); font-weight:700;
+    display:flex; align-items:center; justify-content:center; font-size:.85rem}
+  .note{border-left:3px solid var(--pur); background:rgba(168,85,247,.06);
+    padding:14px 18px; border-radius:0 10px 10px 0; font-size:.92rem; color:#c4c8d8; margin-top:20px}
+  footer{padding:48px 0 72px; border-top:1px solid var(--line); text-align:center; color:var(--muted); font-size:.88rem}
+  .seclist{list-style:none}
+  .seclist li{padding:8px 0 8px 26px; position:relative; color:#c4c8d8; font-size:.95rem}
+  .seclist li::before{content:"✓"; position:absolute; left:0; color:var(--grn); font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <canvas id="viz" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <span class="badge">macOS 14+ · Notarized · MIT · v0.1.0</span>
+    <h1>System audio in <span class="grad">any browser</span></h1>
+    <p class="lead">
+      A tiny notarized macOS menubar app that streams whatever's playing on
+      your Mac to the browser — bit-perfect, <strong>including Safari and
+      Firefox</strong>, where the web can't capture system audio at all.
+      The way Zoom does it. Not a hack.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jayvee6/sj-audio-bridge/releases/latest">Download for macOS</a>
+      <a class="btn ghost" href="https://github.com/jayvee6/sj-audio-bridge">View source</a>
+    </div>
+    <div class="meta">Pairs with <a href="https://github.com/jayvee6/sj-audio">sj-audio</a> — one line of browser code.</div>
+  </div>
+</header>
+
+<section id="why">
+  <div class="wrap lead-row">
+    <div>
+      <h2>Why it exists</h2>
+      <p>
+        Browsers deliberately can't capture system audio.
+        <code>getDisplayMedia</code> is Chromium-desktop only, grabs <em>tab</em>
+        not <em>system</em> audio on macOS, and is often DSP-mangled. Safari and
+        Firefox drop the audio entirely. DRM streams read as silence.
+      </p>
+      <p style="margin-top:14px">
+        Zoom, Webex and Teams don't work around the sandbox — their desktop
+        clients are <strong>native apps</strong> using an OS audio API.
+        SJAudioBridge does exactly that, then hands the audio to the browser
+        over a WebSocket. The page just reads a socket, so it works
+        everywhere, at full fidelity, DRM included.
+      </p>
+    </div>
+    <div>
+      <div class="diagram">┌─ SJAudioBridge.app  (Swift, macOS 14+) ──────┐
+│  ScreenCaptureKit                            │
+│     → Float32 mono PCM (1024-sample blocks)  │
+│     → WebSocket  127.0.0.1  + per-launch tok │
+└───────────────────────┬──────────────────────┘
+                        │  ws://127.0.0.1:17653
+                        │  JSON handshake + binary PCM
+┌────────────────────────▼──────────────────────┐
+│  Any browser — sj-audio                        │
+│  createNativeBridgeSource({ token })           │
+│   → AudioWorklet → analyzer → AudioFrame       │
+│   → your visualizer                            │
+└────────────────────────────────────────────────┘</div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Running in 60 seconds</h2>
+    <ol class="steps">
+      <li><a href="https://github.com/jayvee6/sj-audio-bridge/releases/latest">Download</a> the latest zip, unzip, drag <strong>SJAudioBridge.app</strong> to <code>/Applications</code>, open it.</li>
+      <li>Approve the <strong>Screen Recording</strong> prompt, then quit &amp; relaunch (macOS applies the grant on relaunch).</li>
+      <li>The menubar waveform icon reads <code>capturing — &lt;dBFS&gt; · &lt;N&gt; blk/s</code>.</li>
+      <li>Menubar → <strong>Copy Connection Token</strong>.</li>
+      <li>Paste it into your sj-audio app, connect, play music anywhere.</li>
+    </ol>
+    <div class="note">
+      <strong>Why does an audio tool ask for Screen Recording?</strong>
+      ScreenCaptureKit is permission-gated under Screen Recording even for
+      audio-only capture. SJAudioBridge requests nothing else, captures
+      <strong>no video</strong> (a 2×2 dummy surface that's never read), and
+      never records its own output.
+    </div>
+  </div>
+</section>
+
+<section id="use">
+  <div class="wrap">
+    <h2>One line in the browser</h2>
+    <p style="margin-bottom:18px">
+      <a href="https://github.com/jayvee6/sj-audio">sj-audio</a> injects the
+      PCM into the same analysis pipeline every other source uses — so any
+      sj-audio visualizer works with system audio for free.
+    </p>
+<pre><code>import { createNativeBridgeSource } from
+  'https://cdn.jsdelivr.net/gh/jayvee6/sj-audio@v0.2.0/dist/sj-audio.esm.js';
+
+const source = createNativeBridgeSource({ token });   // from the menubar
+source.onFrame((f) =&gt; drawBars(f.magnitudesSmooth)); // 32 mel bands
+await source.start();</code></pre>
+  </div>
+</section>
+
+<section id="security">
+  <div class="wrap">
+    <h2>Trustworthy by construction</h2>
+    <p style="margin-bottom:18px">It's a local audio tap — so trust is the whole point.</p>
+    <ul class="seclist">
+      <li>WebSocket binds <strong>127.0.0.1 only</strong> — never exposed off-machine.</li>
+      <li>128-bit random token, <strong>regenerated every launch</strong>, required in the handshake and constant-time compared. No token → no audio.</li>
+      <li>Never captures its own output (<code>excludesCurrentProcessAudio</code>).</li>
+      <li>Signed with a Developer ID, <strong>notarized &amp; stapled</strong> by Apple — Gatekeeper opens it with no bypass.</li>
+      <li>No secrets in the repo. Fully open source, MIT.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="more">
+  <div class="wrap">
+    <h2>More</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>sj-audio</h3>
+        <p>The cross-browser web audio capture + analysis library. Four other sources (mic, media element, display, file) need no helper at all.</p>
+        <p style="margin-top:10px"><a href="https://github.com/jayvee6/sj-audio">github.com/jayvee6/sj-audio →</a></p>
+      </div>
+      <div class="card">
+        <h3>Wire protocol v1</h3>
+        <p>A tiny, documented, cross-platform protocol: JSON <code>hello</code> → token <code>auth</code> → <code>ready</code> → binary Float32 PCM.</p>
+        <p style="margin-top:10px"><a href="https://github.com/jayvee6/sj-audio-bridge#wire-protocol-v1">Read the spec →</a></p>
+      </div>
+      <div class="card">
+        <h3>Roadmap</h3>
+        <p>macOS shipped (ScreenCaptureKit). Windows next — a WASAPI-loopback helper speaking the same protocol unchanged.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    SJAudioBridge — MIT © Joe Villarreal ·
+    <a href="https://github.com/jayvee6/sj-audio-bridge">GitHub</a> ·
+    <a href="https://github.com/jayvee6/sj-audio-bridge/releases/latest">Download</a>
+  </div>
+</footer>
+
+<script>
+// Decorative spectrum — synthetic, audio-less (the page can't reach a
+// localhost socket over https; the real thing runs in your sj-audio app).
+(function () {
+  const c = document.getElementById('viz');
+  const ctx = c.getContext('2d');
+  let W, H, dpr;
+  const N = 56;
+  const phase = Array.from({ length: N }, (_, i) => i * 0.5);
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = c.clientWidth; H = c.clientHeight;
+    c.width = W * dpr; c.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize); resize();
+  let t = 0;
+  function frame() {
+    t += 0.025;
+    ctx.clearRect(0, 0, W, H);
+    const bw = W / N;
+    for (let i = 0; i < N; i++) {
+      // bass-heavy envelope + layered sines → music-ish motion
+      const env = Math.pow(1 - i / N, 1.4);
+      const a =
+        (Math.sin(t * 1.7 + phase[i]) * 0.5 + 0.5) * 0.55 +
+        (Math.sin(t * 0.9 + i * 0.3) * 0.5 + 0.5) * 0.45;
+      const h = Math.max(3, env * a * H * 0.95);
+      const x = i * bw + bw * 0.18;
+      const g = ctx.createLinearGradient(0, H, 0, H - h);
+      g.addColorStop(0, '#10b981');
+      g.addColorStop(1, '#a855f7');
+      ctx.fillStyle = g;
+      const w = bw * 0.64, r = Math.min(3, w / 2);
+      const y = H - h;
+      ctx.beginPath();
+      ctx.moveTo(x, H);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body>
+</html>
