@@ -78,10 +78,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// a strong objective correctness signal for the mono-downmix path.
     private func startCapture() async {
         let meter = blockMeter
+        let server = wsServer
         let cap = AudioCapture(
-            blockSize: 1024,
+            blockSize: kBlockSize,
             onBlock: { block in
-                // Audio queue. B5/B6: forward `block` to the WebSocket.
+                // Audio queue → ship the block to authed WS clients (B6)
+                // and tally for the menubar block-rate readout.
+                server.broadcast(block)
                 meter.record(blockSamples: block.count)
             },
             onLevel: { [weak self] rms in
