@@ -1,9 +1,11 @@
 // SJAudioBridge — native macOS system-audio capture → localhost WebSocket
 // for sj-audio's createNativeBridgeSource() web adapter.
 //
-// B1: LSUIElement menubar app skeleton. NSStatusItem with a status line and
-// Quit. No capture yet — ScreenCaptureKit lands in B2/B3, the WS server in
-// B5/B6, and the live Start/Stop + Copy-token UI in B7.
+// B7: full menubar UI — live status, WS endpoint, Copy Connection Token,
+// Start/Stop Capture toggle, Quit. The WebSocket server runs for the app's
+// lifetime (loopback + token-gated → harmless idle); Start/Stop toggles only
+// the privacy-relevant ScreenCaptureKit capture (the macOS recording
+// indicator appears/disappears with it).
 
 import AppKit
 
@@ -11,8 +13,12 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenuItem: NSMenuItem!
+    private var toggleItem: NSMenuItem!
     private var capture: AudioCapture?
     private let wsServer = WSServer()
+    private let blockMeter = BlockMeter()
+    private var wsStarted = false
+    private var capturing = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -27,76 +33,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "SJAudioBridge \(appVersion)", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
+
         statusMenuItem = NSMenuItem(
             title: "Status: checking capture access…",
-            action: nil,
-            keyEquivalent: ""
+            action: nil, keyEquivalent: ""
         )
         menu.addItem(statusMenuItem)
+
+        let endpoint = NSMenuItem(
+            title: "Endpoint: \(wsServer.endpointURL)",
+            action: nil, keyEquivalent: ""
+        )
+        menu.addItem(endpoint)
         menu.addItem(.separator())
+
+        let copyTok = NSMenuItem(
+            title: "Copy Connection Token",
+            action: #selector(copyToken), keyEquivalent: "c"
+        )
+        copyTok.target = self
+        menu.addItem(copyTok)
+
+        toggleItem = NSMenuItem(
+            title: "Stop Capture",
+            action: #selector(toggleCapture), keyEquivalent: ""
+        )
+        toggleItem.target = self
+        toggleItem.isEnabled = false  // enabled once access is confirmed
+        menu.addItem(toggleItem)
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(
             title: "Quit SJAudioBridge",
-            action: #selector(quit),
-            keyEquivalent: "q"
+            action: #selector(quit), keyEquivalent: "q"
         )
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
 
-        // B2: probe Screen Recording access + enumerate shareable content.
-        // The grant prompt appears here on first launch (signed build).
+        // WS server runs for the app lifetime — token-gated loopback, no
+        // audio leaves without both a valid token AND active capture.
+        startWSServerOnce()
+
+        // B2: probe Screen Recording access (prompts on first launch).
         ScreenCaptureAccess.request()
         Task { await self.refreshCaptureStatus() }
     }
 
-    private func refreshCaptureStatus() async {
-        let line: String
+    private func startWSServerOnce() {
+        guard !wsStarted else { return }
         do {
-            let s = try await ShareableContent.summarize()
-            line = "Capture OK — \(s.displayCount) display(s), "
-                + "\(s.applicationCount) app(s)"
+            try wsServer.start()
+            wsStarted = true
             FileHandle.standardError.write(Data(
-                ("[B2] \(line); first: \(s.firstDisplayDescription ?? "none")\n").utf8
+                "[B7] WS server up at \(wsServer.endpointURL)\n".utf8
             ))
-            statusMenuItem.title = "Status: \(line)"
-            await startCapture()
-            return
         } catch {
-            line = "No capture access — grant Screen Recording"
-            FileHandle.standardError.write(Data(
-                ("[B2] \(error)\n").utf8
-            ))
+            FileHandle.standardError.write(Data("[B7] WS server failed: \(error)\n".utf8))
+            statusMenuItem.title = "Status: WS server failed to start"
         }
-        statusMenuItem.title = "Status: \(line)"
     }
 
-    private let blockMeter = BlockMeter()
+    private func refreshCaptureStatus() async {
+        do {
+            let s = try await ShareableContent.summarize()
+            FileHandle.standardError.write(Data(
+                ("[B7] Capture OK — \(s.displayCount) display(s), "
+                    + "\(s.applicationCount) app(s)\n").utf8
+            ))
+            toggleItem.isEnabled = true
+            await startCapture()
+        } catch {
+            FileHandle.standardError.write(Data(("[B7] \(error)\n").utf8))
+            statusMenuItem.title = "Status: no capture access — grant Screen Recording"
+            toggleItem.isEnabled = false
+        }
+    }
 
-    /// B4: start capture producing fixed-size mono PCM blocks. onBlock is
-    /// where the B6 WebSocket will ship frames; for now we count blocks so
-    /// the menubar shows dBFS + block-rate (1024 @ 48 kHz ≈ 46.9 blk/s) —
-    /// a strong objective correctness signal for the mono-downmix path.
     private func startCapture() async {
+        guard !capturing else { return }
         let meter = blockMeter
         let server = wsServer
         let cap = AudioCapture(
             blockSize: kBlockSize,
             onBlock: { block in
-                // Audio queue → ship the block to authed WS clients (B6)
-                // and tally for the menubar block-rate readout.
                 server.broadcast(block)
                 meter.record(blockSamples: block.count)
             },
             onLevel: { [weak self] rms in
                 let rmsD = Double(rms)
                 let db = rmsD > 0 ? 20 * log10(rmsD) : -120
-                let (blkPerSec, lastBlockSize) = meter.sampleAndReset()
-                FileHandle.standardError.write(Data(
-                    (String(
-                        format: "[B4] RMS=%.5f (%.1f dBFS) %.1f blk/s size=%d sr=%d\n",
-                        rmsD, db, blkPerSec, lastBlockSize, AudioCapture.sampleRate
-                    )).utf8
-                ))
+                let (blkPerSec, _) = meter.sampleAndReset()
                 Task { @MainActor in
                     self?.statusMenuItem.title = String(
                         format: "Status: capturing — %.1f dBFS · %.0f blk/s",
@@ -108,22 +135,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try await cap.start()
             capture = cap
-            FileHandle.standardError.write(Data("[B4] SCStream capture started\n".utf8))
+            capturing = true
+            toggleItem.title = "Stop Capture"
+            FileHandle.standardError.write(Data("[B7] capture started\n".utf8))
         } catch {
-            FileHandle.standardError.write(Data("[B4] capture start failed: \(error)\n".utf8))
+            FileHandle.standardError.write(Data("[B7] capture start failed: \(error)\n".utf8))
             statusMenuItem.title = "Status: capture start failed"
-            return
         }
+    }
 
-        // B5: stand up the loopback WebSocket server (token-gated PCM in B6).
-        do {
-            try wsServer.start()
-            FileHandle.standardError.write(Data(
-                "[B5] WS server up at \(wsServer.endpointURL)\n".utf8
-            ))
-        } catch {
-            FileHandle.standardError.write(Data("[B5] WS server failed: \(error)\n".utf8))
+    private func stopCapture() async {
+        guard capturing, let cap = capture else { return }
+        await cap.stop()
+        capture = nil
+        capturing = false
+        toggleItem.title = "Start Capture"
+        statusMenuItem.title = "Status: stopped (no audio captured)"
+        FileHandle.standardError.write(Data("[B7] capture stopped\n".utf8))
+    }
+
+    // MARK: Menu actions
+
+    @objc private func toggleCapture() {
+        Task { @MainActor in
+            if capturing { await stopCapture() } else { await startCapture() }
         }
+    }
+
+    @objc private func copyToken() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(wsServer.token, forType: .string)
+        FileHandle.standardError.write(Data("[B7] token copied to pasteboard\n".utf8))
     }
 
     @objc private func quit() {
@@ -147,7 +190,6 @@ final class BlockMeter: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Returns (blocksPerSecond, lastBlockSize) and resets the window.
     func sampleAndReset() -> (Double, Int) {
         lock.lock()
         let now = Date()
@@ -167,7 +209,6 @@ MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate
-    // .accessory = menubar-only, no Dock icon (mirrors LSUIElement).
     app.setActivationPolicy(.accessory)
     app.run()
 }
