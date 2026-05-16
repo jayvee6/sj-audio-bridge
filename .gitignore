@@ -1,0 +1,14 @@
+.build/
+build/
+*.app
+*.zip
+*.dmg
+.DS_Store
+*.log
+
+# Never commit credentials. Notarization auth lives in the keychain
+# (profile: sj-audio-bridge-notary), never in this repo.
+*.p8
+*.cer
+*.p12
+*.entitlements.local
